@@ -210,26 +210,26 @@ public protocol FerrostarCoreDelegate: AnyObject {
         // This is technically possible, so we need to check and throw, but
         // it should be rather difficult to get a location fix, get a route,
         // and then somehow this property go nil again.
-        guard let location = locationProvider.lastLocation else {
-            throw FerrostarCoreError.userLocationUnknown
-        }
-        // TODO: We should be able to circumvent this and simply start updating, wait and start nav.
-
-        self.config = config
-
-        locationProvider.startUpdating()
-
-        state = NavigationState(
-            snappedLocation: location,
-            heading: locationProvider.lastHeading,
-            fullRouteShape: route.geometry,
-            steps: route.steps
-        )
-        let controller = NavigationController(route: route, config: config.ffiValue)
-        navigationController = controller
-        DispatchQueue.main.async {
-            self.update(newState: controller.getInitialState(location: location), location: location)
-        }
+//        guard let location = locationProvider.lastLocation else {
+//            throw FerrostarCoreError.userLocationUnknown
+//        }
+//        // TODO: We should be able to circumvent this and simply start updating, wait and start nav.
+//
+//        self.config = config
+//
+//        locationProvider.startUpdating()
+//
+//        state = NavigationState(
+//            snappedLocation: location,
+//            heading: locationProvider.lastHeading,
+//            fullRouteShape: route.geometry,
+//            steps: route.steps,
+//            progress: TripProgress(distanceToNextManeuver: 0, distanceRemaining: 0, durationRemaining: 0)
+//        )
+//        let controller = NavigationController(route: route, config: config.ffiValue)
+//        navigationController = controller
+//
+//        self.update(newState: controller.getInitialState(location: location), location: location)
     }
 
     public func advanceToNextStep() {
@@ -256,90 +256,88 @@ public protocol FerrostarCoreDelegate: AnyObject {
     ///
     /// You should call this rather than setting properties directly
     private func update(newState: TripState, location: UserLocation) {
-        DispatchQueue.main.async {
-            self.tripState = newState
+        self.tripState = newState
 
-            switch newState {
-            case let .navigating(
-                snappedUserLocation: snappedLocation,
-                remainingSteps: remainingSteps,
-                remainingWaypoints: remainingWaypoints,
-                progress: progress,
-                deviation: deviation,
-                visualInstruction: visualInstruction,
-                spokenInstruction: spokenInstruction
-            ):
-                self.state?.snappedLocation = snappedLocation
-                self.state?.currentStep = remainingSteps.first
-                self.state?.visualInstruction = visualInstruction
-                self.state?.spokenInstruction = spokenInstruction
-                self.state?.progress = progress
+        switch newState {
+        case let .navigating(
+            snappedUserLocation: snappedLocation,
+            remainingSteps: remainingSteps,
+            remainingWaypoints: remainingWaypoints,
+            progress: progress,
+            deviation: deviation,
+            visualInstruction: visualInstruction,
+            spokenInstruction: spokenInstruction
+        ):
+            self.state?.snappedLocation = snappedLocation
+            self.state?.currentStep = remainingSteps.first
+            self.state?.visualInstruction = visualInstruction
+            self.state?.spokenInstruction = spokenInstruction
+            self.state?.progress = progress
 
-                self.state?.routeDeviation = deviation
-                switch deviation {
-                case .noDeviation:
-                    // No action
+            self.state?.routeDeviation = deviation
+            switch deviation {
+            case .noDeviation:
+                // No action
+                break
+            case let .offRoute(deviationFromRouteLine: deviationFromRouteLine):
+                guard !self.routeRequestInFlight,
+                      self.lastAutomaticRecalculation?.timeIntervalSinceNow ?? -TimeInterval
+                      .greatestFiniteMagnitude < -self
+                      .minimumTimeBeforeRecalculaton
+                else {
                     break
-                case let .offRoute(deviationFromRouteLine: deviationFromRouteLine):
-                    guard !self.routeRequestInFlight,
-                          self.lastAutomaticRecalculation?.timeIntervalSinceNow ?? -TimeInterval
-                          .greatestFiniteMagnitude < -self
-                          .minimumTimeBeforeRecalculaton
-                    else {
-                        break
-                    }
+                }
 
-                    switch self.delegate?.core(
-                        self,
-                        correctiveActionForDeviation: deviationFromRouteLine,
-                        remainingWaypoints: remainingWaypoints
-                    ) ?? .getNewRoutes(waypoints: remainingWaypoints) {
-                    case .doNothing:
-                        break
-                    case let .getNewRoutes(waypoints):
-                        self.state?.isCalculatingNewRoute = true
-                        self.recalculationTask = Task {
-                            do {
-                                let routes = try await self.getRoutes(
-                                    initialLocation: location,
-                                    waypoints: waypoints
-                                )
-                                if let delegate = self.delegate {
-                                    delegate.core(self, loadedAlternateRoutes: routes)
-                                } else if let route = routes.first, let config = self.config {
-                                    // Default behavior when no delegate is assigned:
-                                    // accept the first route, as this is what most users want when they go off route.
-                                    try self.startNavigation(route: route, config: config)
-                                }
-                            } catch {
-                                // Do nothing; this exists to enable us to run what amounts to an "async defer"
+                switch self.delegate?.core(
+                    self,
+                    correctiveActionForDeviation: deviationFromRouteLine,
+                    remainingWaypoints: remainingWaypoints
+                ) ?? .getNewRoutes(waypoints: remainingWaypoints) {
+                case .doNothing:
+                    break
+                case let .getNewRoutes(waypoints):
+                    self.state?.isCalculatingNewRoute = true
+                    self.recalculationTask = Task {
+                        do {
+                            let routes = try await self.getRoutes(
+                                initialLocation: location,
+                                waypoints: waypoints
+                            )
+                            if let delegate = self.delegate {
+                                delegate.core(self, loadedAlternateRoutes: routes)
+                            } else if let route = routes.first, let config = self.config {
+                                // Default behavior when no delegate is assigned:
+                                // accept the first route, as this is what most users want when they go off route.
+                                try self.startNavigation(route: route, config: config)
                             }
+                        } catch {
+                            // Do nothing; this exists to enable us to run what amounts to an "async defer"
+                        }
 
-                            await MainActor.run {
-                                self.lastAutomaticRecalculation = Date()
-                                self.state?.isCalculatingNewRoute = false
-                            }
+                        await MainActor.run {
+                            self.lastAutomaticRecalculation = Date()
+                            self.state?.isCalculatingNewRoute = false
                         }
                     }
                 }
-
-                if let spokenInstruction, !self.queuedUtteranceIDs.contains(spokenInstruction.utteranceId) {
-                    self.queuedUtteranceIDs.insert(spokenInstruction.utteranceId)
-
-                    // This sholud not happen on the main queue as it can block;
-                    // we'll probably remove the need for this eventually
-                    // by making FerrostarCore its own actor
-                    DispatchQueue.global(qos: .default).async {
-                        self.spokenInstructionObserver?.spokenInstructionTriggered(spokenInstruction)
-                    }
-                }
-            case .complete:
-                // TODO: "You have arrived"?
-                self.state?.visualInstruction = nil
-                self.state?.snappedLocation = location
-                self.state?.spokenInstruction = nil
-                self.state?.routeDeviation = nil
             }
+
+            if let spokenInstruction, !self.queuedUtteranceIDs.contains(spokenInstruction.utteranceId) {
+                self.queuedUtteranceIDs.insert(spokenInstruction.utteranceId)
+
+                // This sholud not happen on the main queue as it can block;
+                // we'll probably remove the need for this eventually
+                // by making FerrostarCore its own actor
+                DispatchQueue.global(qos: .default).async {
+                    self.spokenInstructionObserver?.spokenInstructionTriggered(spokenInstruction)
+                }
+            }
+        case .complete:
+            // TODO: "You have arrived"?
+            self.state?.visualInstruction = nil
+            self.state?.snappedLocation = location
+            self.state?.spokenInstruction = nil
+            self.state?.routeDeviation = nil
         }
     }
 }
